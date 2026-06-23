@@ -160,29 +160,64 @@ function CheckoutContent() {
 
     setUploadingProof(true)
 
+    // DETAILED LOGGING
+    const BUCKET_NAME = 'payment-proofs'
     const fileName = `proofs/${createdOrder.order_id}/${Date.now()}_${proofFile.name}`
-    const { error: uploadError } = await supabase.storage
-      .from('payments')
-      .upload(fileName, proofFile)
+
+    console.log('========== UPLOAD PROOF START ==========')
+    console.log('File:', proofFile.name)
+    console.log('File size:', proofFile.size, 'bytes')
+    console.log('File type:', proofFile.type)
+    console.log('Bucket:', BUCKET_NAME)
+    console.log('Upload path:', fileName)
+
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(fileName, proofFile, {
+        cacheControl: '3600',
+        upsert: false
+      })
+
+    console.log('Supabase upload response:')
+    console.log('  data:', uploadData)
+    console.log('  error:', uploadError)
 
     if (uploadError) {
-      toast.error('Gagal mengunggah bukti pembayaran')
+      console.error('========== UPLOAD ERROR ==========')
+      console.error('Error message:', uploadError.message)
+      console.error('Error name:', uploadError.name)
+      console.error('Error stack:', uploadError.stack)
+      console.error('Full error object:', JSON.stringify(uploadError, null, 2))
+
+      // Show detailed error to user
+      const errorMsg = uploadError.message || JSON.stringify(uploadError) || 'Unknown upload error'
+      toast.error(`Upload gagal: ${errorMsg}`)
       setUploadingProof(false)
       return
     }
 
-    const proofUrl = supabase.storage.from('payments').getPublicUrl(fileName).data.publicUrl
+    console.log('========== UPLOAD SUCCESS ==========')
+    const proofUrl = supabase.storage.from(BUCKET_NAME).getPublicUrl(fileName).data.publicUrl
+    console.log('Proof URL:', proofUrl)
 
-    const { error: updateError } = await supabase
+    const { data: updateData, error: updateError } = await supabase
       .from('orders')
       .update({
         payment_proof: proofUrl,
         payment_status: 'pending_verification'
       })
       .eq('id', createdOrder.order_id)
+      .select()
+
+    console.log('Order update response:')
+    console.log('  data:', updateData)
+    console.log('  error:', updateError)
 
     if (updateError) {
-      toast.error('Gagal menyimpan bukti')
+      console.error('========== ORDER UPDATE ERROR ==========')
+      console.error('Error message:', updateError.message)
+      console.error('Full error:', JSON.stringify(updateError, null, 2))
+      toast.error(`Gagal menyimpan bukti: ${updateError.message}`)
     } else {
       toast.success('Bukti pembayaran berhasil diunggah')
       setCreatedOrder({ ...createdOrder, payment_status: 'pending_verification' })
@@ -196,6 +231,7 @@ function CheckoutContent() {
     }
 
     setUploadingProof(false)
+    console.log('========== UPLOAD PROOF END ==========')
   }
 
   const handleProofFile = (e: React.ChangeEvent<HTMLInputElement>) => {
