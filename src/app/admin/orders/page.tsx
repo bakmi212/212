@@ -5,7 +5,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { createBrowserClient } from '@/lib/supabase/client'
-import { Loader2, Check, X, Trash2, AlertTriangle, Eye, CheckCircle, XCircle, Activity } from 'lucide-react'
+import { Loader2, Check, X, Trash2, AlertTriangle, Eye, CheckCircle, XCircle, Activity, Package, DollarSign, Clock, TrendingUp, ShoppingCart, Ban } from 'lucide-react'
 import { toast } from 'sonner'
 import { runOrderActions } from '@/lib/order-action-engine'
 
@@ -20,8 +20,11 @@ interface Order {
   payment_proof: string | null
   rejection_reason: string | null
   created_at: string
+  billing_name: string
+  billing_email: string
+  billing_phone: string
   user: { email: string } | null
-  order_items: { product: { name: string } | null }[]
+  order_items: { product: { name: string } | null, product_name: string | null, variant_name: string | null }[]
   payment_account: {
     payment_name: string
     type: string
@@ -29,6 +32,16 @@ interface Order {
     account_number: string | null
     account_holder: string | null
   } | null
+}
+
+interface OrderStats {
+  total: number
+  pending_payment: number
+  pending_verification: number
+  paid: number
+  processing: number
+  completed: number
+  cancelled: number
 }
 
 const formatIDR = (amount: number) =>
@@ -39,10 +52,10 @@ const ORDER_STATUS_OPTIONS = ['all', 'pending', 'processing', 'completed', 'canc
 
 const paymentStatusBadge = (status: string) => {
   switch (status) {
-    case 'paid': return <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 border-0">Paid</Badge>
-    case 'pending_payment': return <Badge className="bg-amber-50 text-amber-700 hover:bg-amber-50 border-0">Pending Payment</Badge>
-    case 'pending_verification': return <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-0">Pending Verification</Badge>
-    case 'rejected': return <Badge className="bg-red-50 text-red-700 hover:bg-red-50 border-0">Rejected</Badge>
+    case 'paid': return <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 border-0">Dibayar</Badge>
+    case 'pending_payment': return <Badge className="bg-orange-50 text-orange-700 hover:bg-orange-50 border-0">Menunggu Pembayaran</Badge>
+    case 'pending_verification': return <Badge className="bg-blue-50 text-blue-700 hover:bg-blue-50 border-0">Menunggu Verifikasi</Badge>
+    case 'rejected': return <Badge className="bg-red-50 text-red-700 hover:bg-red-50 border-0">Ditolak</Badge>
     default: return <Badge variant="secondary">{status || '-'}</Badge>
   }
 }
@@ -60,11 +73,13 @@ const orderStatusBadge = (status: string) => {
 export default function AdminOrdersPage() {
   const [loading, setLoading] = useState(true)
   const [orders, setOrders] = useState<Order[]>([])
+  const [stats, setStats] = useState<OrderStats>({ total: 0, pending_payment: 0, pending_verification: 0, paid: 0, processing: 0, completed: 0, cancelled: 0 })
   const [filterPayment, setFilterPayment] = useState('all')
   const [filterOrder, setFilterOrder] = useState('all')
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
   const [detailOrder, setDetailOrder] = useState<Order | null>(null)
+  const [debugInfo, setDebugInfo] = useState<{ count: number; queryTime: string } | null>(null)
 
   const openDetail = async (order: Order) => {
     setDetailOrder(order)
@@ -96,19 +111,46 @@ export default function AdminOrdersPage() {
   useEffect(() => { fetchOrders() }, [filterPayment, filterOrder])
 
   const fetchOrders = async () => {
+    const startTime = Date.now()
+
+    // Fetch ALL orders for stats (no filters)
+    const { data: allOrdersData } = await supabase
+      .from('orders')
+      .select('payment_status, order_status')
+
+    // Calculate stats
+    const allOrders = allOrdersData || []
+    const calculatedStats: OrderStats = {
+      total: allOrders.length,
+      pending_payment: allOrders.filter(o => o.payment_status === 'pending_payment').length,
+      pending_verification: allOrders.filter(o => o.payment_status === 'pending_verification').length,
+      paid: allOrders.filter(o => o.payment_status === 'paid').length,
+      processing: allOrders.filter(o => o.order_status === 'processing').length,
+      completed: allOrders.filter(o => o.order_status === 'completed').length,
+      cancelled: allOrders.filter(o => o.order_status === 'cancelled').length,
+    }
+    setStats(calculatedStats)
+
+    // Fetch orders with filters for display
     let query = supabase
       .from('orders')
       .select(`
         id, order_number, total_amount, status, payment_status, order_status,
         payment_method, payment_proof, rejection_reason, created_at,
+        billing_name, billing_email, billing_phone,
         user:profiles(email),
-        order_items(product:products(name)),
+        order_items(product:products(name), product_name, variant_name),
         payment_account:payment_accounts(payment_name, type, bank_name, account_number, account_holder)
       `)
       .order('created_at', { ascending: false })
     if (filterPayment !== 'all') query = query.eq('payment_status', filterPayment)
     if (filterOrder !== 'all') query = query.eq('order_status', filterOrder)
     const { data } = await query
+
+    // Debug info
+    const queryTime = `${Date.now() - startTime}ms`
+    setDebugInfo({ count: data?.length || 0, queryTime })
+
     const formatted: Order[] = (data as any[])?.map(row => ({
       id: row.id,
       order_number: row.order_number,
@@ -120,9 +162,14 @@ export default function AdminOrdersPage() {
       payment_proof: row.payment_proof,
       rejection_reason: row.rejection_reason,
       created_at: row.created_at,
+      billing_name: row.billing_name,
+      billing_email: row.billing_email,
+      billing_phone: row.billing_phone,
       user: Array.isArray(row.user) ? row.user[0] : row.user,
       order_items: (row.order_items || []).map((item: any) => ({
-        product: Array.isArray(item.product) ? item.product[0] : item.product
+        product: Array.isArray(item.product) ? item.product[0] : item.product,
+        product_name: item.product_name,
+        variant_name: item.variant_name,
       })),
       payment_account: Array.isArray(row.payment_account) ? row.payment_account[0] : row.payment_account,
     })) || []
@@ -194,7 +241,82 @@ export default function AdminOrdersPage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900">Orders Management</h1>
-          <p className="text-slate-500 mt-0.5">{orders.length} orders</p>
+          <p className="text-slate-500 mt-0.5">{orders.length} orders displayed • {stats.total} total</p>
+        </div>
+      </div>
+
+      {/* Debug Info */}
+      {debugInfo && (
+        <div className="bg-slate-100 border border-slate-300 rounded-lg p-3 text-xs font-mono mb-4">
+          <p className="text-slate-600">Query: SELECT * FROM orders ORDER BY created_at DESC ({debugInfo.queryTime})</p>
+          <p className="text-slate-900 font-semibold mt-1">Orders returned: {debugInfo.count}</p>
+        </div>
+      )}
+
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mb-6">
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Total Orders</p>
+              <p className="text-xl font-bold text-slate-900">{stats.total}</p>
+            </div>
+            <Package className="h-6 w-6 text-slate-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Pending Payment</p>
+              <p className="text-xl font-bold text-orange-600">{stats.pending_payment}</p>
+            </div>
+            <DollarSign className="h-6 w-6 text-orange-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Pending Verification</p>
+              <p className="text-xl font-bold text-blue-600">{stats.pending_verification}</p>
+            </div>
+            <Clock className="h-6 w-6 text-blue-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Paid</p>
+              <p className="text-xl font-bold text-green-600">{stats.paid}</p>
+            </div>
+            <CheckCircle className="h-6 w-6 text-green-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Processing</p>
+              <p className="text-xl font-bold text-indigo-600">{stats.processing}</p>
+            </div>
+            <TrendingUp className="h-6 w-6 text-indigo-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Completed</p>
+              <p className="text-xl font-bold text-emerald-600">{stats.completed}</p>
+            </div>
+            <ShoppingCart className="h-6 w-6 text-emerald-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-slate-500">Cancelled</p>
+              <p className="text-xl font-bold text-slate-600">{stats.cancelled}</p>
+            </div>
+            <Ban className="h-6 w-6 text-slate-400" />
+          </div>
         </div>
       </div>
 
@@ -252,11 +374,19 @@ export default function AdminOrdersPage() {
                             {new Date(order.created_at).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}
                           </p>
                         </td>
-                        <td className="py-3.5 px-4 text-sm text-slate-700">{order.user?.email || '-'}</td>
                         <td className="py-3.5 px-4">
-                          <span className="text-xs text-slate-600 line-clamp-2 max-w-[140px]">
-                            {order.order_items.map(i => i.product?.name).filter(Boolean).join(', ') || '-'}
-                          </span>
+                          <div className="text-sm font-medium text-slate-900">{order.billing_name || order.user?.email || '-'}</div>
+                          <div className="text-xs text-slate-500">{order.billing_email || '-'}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="text-xs text-slate-900 max-w-[140px]">
+                            {order.order_items.map((item, i) => (
+                              <div key={i}>
+                                <span className="font-medium">{item.product_name || item.product?.name || '-'}</span>
+                                {item.variant_name && <span className="text-blue-600 ml-1">({item.variant_name})</span>}
+                              </div>
+                            ))}
+                          </div>
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-sm text-slate-900">{formatIDR(Number(order.total_amount))}</td>
                         <td className="py-3.5 px-4">{paymentStatusBadge(order.payment_status)}</td>
